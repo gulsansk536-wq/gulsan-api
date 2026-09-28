@@ -1,10 +1,13 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
-const admin = require("firebase-admin");
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const serviceAccount = require("/etc/secrets/firebase-service-account.json");
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-const db = admin.firestore();
+const firebaseApp = initializeApp({ credential: cert(serviceAccount) });
+const db = getFirestore(firebaseApp);
+const auth = getAuth(firebaseApp);
 
 
 async function requireAuth(req, res, next) {
@@ -15,7 +18,7 @@ async function requireAuth(req, res, next) {
     }
 
     const token = header.substring(7);
-    req.user = await admin.auth().verifyIdToken(token);
+    req.user = await auth.verifyIdToken(token);
     next();
   } catch (error) {
     console.error("AUTH ERROR:", error.message);
@@ -152,8 +155,8 @@ app.post("/api/order", requireAuth, async (req, res) => {
         amount: amount,
         status: "Processing",
         providerStatus: "Creating",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp()
       });
     });
 
@@ -181,7 +184,7 @@ app.post("/api/order", requireAuth, async (req, res) => {
           status: "Failed",
           providerStatus: "Failed",
           providerResponse: providerData || null,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          updatedAt: FieldValue.serverTimestamp()
         });
       });
 
@@ -195,7 +198,7 @@ app.post("/api/order", requireAuth, async (req, res) => {
       status: "Pending",
       providerStatus: "Pending",
       providerResponse: providerData,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      updatedAt: FieldValue.serverTimestamp()
     });
 
     return res.json({
