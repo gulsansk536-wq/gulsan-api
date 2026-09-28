@@ -226,6 +226,76 @@ app.post("/api/order", requireAuth, async (req, res) => {
   }
 });
 
+
+app.get("/api/my-orders", requireAuth, async (req, res) => {
+  try {
+    const snapshot = await db.collection("orders")
+      .where("userId", "==", req.user.uid)
+      .get();
+
+    const orders = [];
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      let updatedData = { ...data };
+
+      if (data.providerOrderId) {
+        try {
+          const providerStatus = await fatherAPI({
+            action: "status",
+            order: String(data.providerOrderId)
+          });
+
+          if (providerStatus && providerStatus.status) {
+            updatedData.status = String(providerStatus.status);
+            updatedData.providerStatus = String(providerStatus.status);
+            updatedData.providerDetails = providerStatus;
+
+            await doc.ref.update({
+              status: updatedData.status,
+              providerStatus: updatedData.providerStatus,
+              providerDetails: providerStatus,
+              updatedAt: FieldValue.serverTimestamp()
+            });
+          }
+        } catch (statusError) {
+          console.error(
+            "STATUS SYNC ERROR:",
+            data.providerOrderId,
+            statusError.message
+          );
+        }
+      }
+
+      orders.push({
+        id: doc.id,
+        data: updatedData
+      });
+    }
+
+    orders.sort((a, b) => {
+      const aTime = a.data.createdAt?.toMillis
+        ? a.data.createdAt.toMillis()
+        : 0;
+      const bTime = b.data.createdAt?.toMillis
+        ? b.data.createdAt.toMillis()
+        : 0;
+      return bTime - aTime;
+    });
+
+    return res.json({
+      success: true,
+      orders
+    });
+
+  } catch (error) {
+    console.error("MY ORDERS ERROR:", error);
+    return res.status(500).json({
+      error: "Failed to load orders"
+    });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`GULSAN API running on port ${PORT}`);
 });
