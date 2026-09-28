@@ -1,6 +1,27 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+const admin = require("firebase-admin");
+const serviceAccount = require("/etc/secrets/firebase-service-account.json");
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+const db = admin.firestore();
+
+
+async function requireAuth(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    if (!header.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Login required" });
+    }
+
+    const token = header.substring(7);
+    req.user = await admin.auth().verifyIdToken(token);
+    next();
+  } catch (error) {
+    console.error("AUTH ERROR:", error.message);
+    return res.status(401).json({ error: "Invalid login token" });
+  }
+}
 
 const app = express();
 
@@ -48,28 +69,156 @@ app.get("/api/services", async (req, res) => {
 });
 
 
-app.post("/api/order", async (req, res) => {
+app.post("/api/order", requireAuth, async (req, res) => {
+  let localOrderRef = null;
+
   try {
     const { service, link, quantity } = req.body || {};
+    const qty = Number(quantity);
 
-    if (!service || !link || !quantity) {
+    if (!service || !link || !Number.isFinite(qty) || qty <= 0) {
       return res.status(400).json({
-        error: "service, link and quantity are required"
+        error: "service, link and valid quantity are required"
       });
     }
 
-    const data = await fatherAPI({
+    // Get the real service data from FatherSMM.
+    const servicesData = await fatherAPI({ action: "services" });
+    const services = Array.isArray(servicesData)
+      ? servicesData
+      : (servicesData.services || []);
+
+    const selected = services.find(
+      item => String(item.service) === String(service)
+    );
+
+    if (!selected) {
+      return res.status(400).json({ error: "Service not found" });
+    }
+
+    const rate = Number(selected.rate);
+    const min = Number(selected.min);
+    const max = Number(selected.max);
+
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return res.status(400).json({ error: "Invalid service price" });
+    }
+
+    if (Number.isFinite(min) && qty < min) {
+      return res.status(400).json({
+        error: `Minimum quantity is ${min}`
+      });
+    }
+
+    if (Number.isFinite(max) && qty > max) {
+      return res.status(400).json({
+        error: `Maximum quantity is ${max}`
+      });
+    }
+
+    const amount = Number(((qty / 1000) * rate).toFixed(2));
+    const userRef = db.collection("Users").doc(req.user.uid);
+    localOrderRef = db.collection("orders").doc();
+
+    // Deduct balance and create a local order atomically.
+    await db.runTransaction(async transaction => {
+      const userSnap = await transaction.get(userRef);
+
+      if (!userSnap.exists) {
+        throw new Error("USER_NOT_FOUND");
+      }
+
+      const userData = userSnap.data() || {};
+      const balance = Number(userData.balance || 0);
+
+      if (!Number.isFinite(balance) || balance < amount) {
+        throw new Error("INSUFFICIENT_BALANCE");
+      }
+
+      transaction.update(userRef, {
+        balance: Number((balance - amount).toFixed(2))
+      });
+
+      transaction.set(localOrderRef, {
+        userId: req.user.uid,
+        userEmail: req.user.email || userData.email || "",
+        providerOrderId: null,
+        providerServiceId: String(service),
+        serviceName: selected.name || `Service ${service}`,
+        category: selected.category || "",
+        link: String(link),
+        quantity: qty,
+        rate: rate,
+        amount: amount,
+        status: "Processing",
+        providerStatus: "Creating",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+
+    // Create the real order at FatherSMM.
+    const providerData = await fatherAPI({
       action: "add",
       service: String(service),
       link: String(link),
-      quantity: String(quantity)
+      quantity: String(qty)
     });
 
-    res.json(data);
+    if (!providerData || !providerData.order) {
+      // Provider failed: refund the user's balance.
+      await db.runTransaction(async transaction => {
+        const userSnap = await transaction.get(userRef);
+        const currentBalance = Number(
+          (userSnap.data() || {}).balance || 0
+        );
+
+        transaction.update(userRef, {
+          balance: Number((currentBalance + amount).toFixed(2))
+        });
+
+        transaction.update(localOrderRef, {
+          status: "Failed",
+          providerStatus: "Failed",
+          providerResponse: providerData || null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      });
+
+      return res.status(400).json({
+        error: providerData?.error || "FatherSMM order failed"
+      });
+    }
+
+    await localOrderRef.update({
+      providerOrderId: String(providerData.order),
+      status: "Pending",
+      providerStatus: "Pending",
+      providerResponse: providerData,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    return res.json({
+      success: true,
+      order: String(providerData.order),
+      localOrderId: localOrderRef.id,
+      amount: amount,
+      status: "Pending"
+    });
+
   } catch (error) {
     console.error("ORDER ERROR:", error);
-    res.status(500).json({
-      error: "Order API request failed"
+
+    if (error.message === "INSUFFICIENT_BALANCE") {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+
+    if (error.message === "USER_NOT_FOUND") {
+      return res.status(404).json({ error: "User account not found" });
+    }
+
+    return res.status(500).json({
+      error: "Order processing failed"
     });
   }
 });
