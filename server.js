@@ -63,7 +63,25 @@ app.get("/api/services", async (req, res) => {
       action: "services"
     });
 
-    res.json(data);
+    const services = Array.isArray(data)
+      ? data
+      : (Array.isArray(data.services) ? data.services : []);
+
+    const markedUpServices = services.map(service => ({
+      ...service,
+      rate: Number.isFinite(Number(service.rate))
+        ? (Number(service.rate) * 1.15).toFixed(4)
+        : service.rate
+    }));
+
+    if (Array.isArray(data)) {
+      return res.json(markedUpServices);
+    }
+
+    res.json({
+      ...data,
+      services: markedUpServices
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({
@@ -101,6 +119,7 @@ app.post("/api/order", requireAuth, async (req, res) => {
     }
 
     const rate = Number(selected.rate);
+    const customerRate = Number((rate * 1.15).toFixed(4));
     const min = Number(selected.min);
     const max = Number(selected.max);
 
@@ -120,7 +139,7 @@ app.post("/api/order", requireAuth, async (req, res) => {
       });
     }
 
-    const amount = Number(((qty / 1000) * rate).toFixed(2));
+    const amount = Number(((qty / 1000) * customerRate).toFixed(2));
     const userRef = db.collection("Users").doc(req.user.uid);
     localOrderRef = db.collection("orders").doc();
 
@@ -152,7 +171,7 @@ app.post("/api/order", requireAuth, async (req, res) => {
         category: selected.category || "",
         link: String(link),
         quantity: qty,
-        rate: rate,
+        rate: customerRate,
         amount: amount,
         status: "Processing",
         providerStatus: "Creating",
