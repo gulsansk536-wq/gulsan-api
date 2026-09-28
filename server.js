@@ -13,6 +13,7 @@ const auth = getAuth(firebaseApp);
 async function requireAuth(req, res, next) {
   try {
     const header = req.headers.authorization || "";
+      console.log("AUTH HEADER:", header ? "PRESENT" : "MISSING");
     if (!header.startsWith("Bearer ")) {
       return res.status(401).json({ error: "Login required" });
     }
